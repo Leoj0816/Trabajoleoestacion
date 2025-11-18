@@ -1,0 +1,210 @@
+/*********************************************************************
+  Estación Meteorológica Completa + TTN (OTAA) - Envío CADA 1 MINUTO
+  LilyGO TTGO LoRa32 v1.6 / v2.1 - 915 MHz (Colombia - US915)
+*********************************************************************/
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "config.h"
+#include "DFRobot_EnvironmentalSensor.h"
+#include "DFRobot_AirQualitySensor.h"
+#include "SparkFun_Weather_Meter_Kit_Arduino_Library.h"
+
+// -------------------- RadioLib LoRaWAN --------------------
+#include <RadioLib.h>
+#include "config.h"
+
+
+// -------------------- Configuración OLED --------------------
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// -------------------- Sensores DFRobot --------------------
+DFRobot_EnvironmentalSensor environment(SEN050X_DEFAULT_DEVICE_ADDRESS, &Wire);
+#define SEN0460_ADDR 0x19
+DFRobot_AirQualitySensor particle(&Wire, SEN0460_ADDR);
+
+// -------------------- Sensor meteorológico DS-15901 --------------------
+int windDirectionPin = 35;   // ADC - Veleta
+int windSpeedPin     = 14;   // Digital - Anemómetro
+int rainfallPin      = 15;   // Digital - Pluviómetro
+SFEWeatherMeterKit weatherMeterKit(windDirectionPin, windSpeedPin, rainfallPin);
+
+// -------------------- Variables globales para envío TTN --------------------
+unsigned long ultimoEnvioTTN = 0;
+const unsigned long intervaloTTN = 1UL * 60UL * 1000UL;  // ← ¡1 MINUTO! (antes eran 10)
+
+float lluviaInicioIntervalo = 0.0;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+
+  // --- OLED ---
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println(F("❌ Error OLED"));
+    for (;;);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Iniciando...");
+  display.display();
+
+  // --- SEN0501 ---
+  while (environment.begin() != 0) {
+    Serial.println("❌ SEN0501 no detectado");
+    delay(1000);
+  }
+  Serial.println("✅ SEN0501 OK");
+
+  // --- SEN0460 ---
+  int intentos = 0;
+  while (!particle.begin() && intentos < 5) {
+    Serial.println("❌ SEN0460 no detectado...");
+    delay(1000);
+    intentos++;
+  }
+  if (particle.begin()) Serial.println("✅ SEN0460 OK");
+
+  // --- Weather Meter Kit ---
+#ifdef SFE_WMK_PLAFTORM_UNKNOWN
+  weatherMeterKit.setADCResolutionBits(12);
+#endif
+  weatherMeterKit.begin();
+  Serial.println("✅ Weather Meter Kit OK");
+
+  // --- LoRaWAN OTAA ---
+  Serial.println(F("\nIniciando módulo LoRaWAN..."));
+  int16_t state = radio.begin();
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("Error radio: %d\n", state);
+    while (true);
+  }
+
+  state = node.beginOTAA(joinEUI, devEUI, nwkKey, appKey);
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("Error beginOTAA: %d\n", state);
+    while (true);
+  }
+
+  Serial.println(F("Intentando JOIN OTAA..."));
+  while (true) {
+    state = node.activateOTAA();
+    if (state == RADIOLIB_LORAWAN_NEW_SESSION) {
+      Serial.println(F("✅ ¡JOIN exitoso!"));
+      break;
+    }
+    Serial.printf("JOIN falló (%d), reintentando en 15s...\n", state);
+    delay(15000);
+  }
+
+  lluviaInicioIntervalo = weatherMeterKit.getTotalRainfall();
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Todo OK + TTN 1min");
+  display.display();
+  delay(2000);
+}
+
+void loop() {
+  // =================== Lectura de todos los sensores ===================
+  float tempC = environment.getTemperature(TEMP_C);
+  float hum   = environment.getHumidity();
+  float uv    = environment.getUltravioletIntensity();
+  if (uv < 0) uv = 0;
+  float lux   = environment.getLuminousIntensity();
+  float press = environment.getAtmospherePressure(HPA);
+
+  uint16_t PM1_0 = 0, PM2_5 = 0, PM10 = 0;
+  if (particle.begin()) {
+    PM1_0 = particle.gainParticleConcentration_ugm3(PARTICLE_PM1_0_ATMOSPHERE);
+    PM2_5 = particle.gainParticleConcentration_ugm3(PARTICLE_PM2_5_ATMOSPHERE);
+    PM10  = particle.gainParticleConcentration_ugm3(PARTICLE_PM10_ATMOSPHERE);
+  }
+
+  float windDir = weatherMeterKit.getWindDirection();
+  float windSpd = weatherMeterKit.getWindSpeed();
+  float rainTotal = weatherMeterKit.getTotalRainfall();
+
+  // =================== Mostrar en OLED y Serial ===================
+  Serial.println("===== SEN0501 =====");
+  Serial.printf("Temp: %.2f°C | Hum: %.2f%% | UV: %.2f mW/cm² | Luz: %.0f lx | Pres: %.1f hPa\n", tempC, hum, uv, lux, press);
+  if (particle.begin()) {
+    Serial.println("===== SEN0460 =====");
+    Serial.printf("PM1.0: %u | PM2.5: %u | PM10: %u µg/m³\n", PM1_0, PM2_5, PM10);
+  }
+  Serial.println("===== DS-15901 =====");
+  Serial.printf("Dir: %.1f° | Vel: %.2f km/h | Lluvia total: %.2f mm\n", windDir, windSpd, rainTotal);
+
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(" Weather Station");
+  display.print("T: "); display.print(tempC, 1); display.println(" C");
+  display.print("H: "); display.print(hum, 0); display.println(" %");
+  display.print("P: "); display.print(press, 0); display.println(" hPa");
+  display.print("V: "); display.print(windSpd, 1); display.println(" km/h");
+  display.print("D: "); display.print(windDir, 0); display.println(" deg");
+  display.display();
+
+  // =================== Envío a TTN cada 1 minuto ===================
+  if (millis() - ultimoEnvioTTN >= intervaloTTN) {
+    float lluviaIntervalo = rainTotal - lluviaInicioIntervalo;
+
+    uint8_t payload[20] = {0};
+
+    int16_t temp10 = (int16_t)round(tempC * 10);
+    payload[0] = highByte(temp10);
+    payload[1] = lowByte(temp10);
+
+    payload[2] = (uint8_t)round(hum * 2);
+
+    uint16_t pres10 = (uint16_t)round(press * 10);
+    payload[3] = highByte(pres10);
+    payload[4] = lowByte(pres10);
+
+    uint16_t wind10 = (uint16_t)round(windSpd * 10);
+    payload[5] = highByte(wind10);
+    payload[6] = lowByte(wind10);
+
+    uint16_t dir = (uint16_t)round(windDir);
+    payload[7] = highByte(dir);
+    payload[8] = lowByte(dir);
+
+    uint16_t rain100 = (uint16_t)round(lluviaIntervalo * 100);
+    payload[9]  = highByte(rain100);
+    payload[10] = lowByte(rain100);
+
+    uint16_t uv100 = (uint16_t)round(uv * 100);
+    payload[11] = highByte(uv100);
+    payload[12] = lowByte(uv100);
+
+    uint16_t luz = (uint16_t)round(lux);
+    payload[13] = highByte(luz);
+    payload[14] = lowByte(luz);
+
+    payload[15] = (uint8_t)constrain(PM1_0, 0, 255);
+    payload[16] = (uint8_t)constrain(PM2_5, 0, 255);
+    payload[17] = (uint8_t)constrain(PM10,  0, 255);
+
+    Serial.println(F("\n📡 Enviando a TTN (cada 1 min)..."));
+    int16_t state = node.sendReceive(payload, sizeof(payload));
+
+    if (state < RADIOLIB_ERR_NONE) {
+      Serial.printf("❌ Error envío: %d\n", state);
+    } else {
+      Serial.println("✅ Uplink enviado correctamente");
+      if (state > 0) Serial.println("📥 Downlink recibido");
+    }
+
+    lluviaInicioIntervalo = rainTotal;
+    ultimoEnvioTTN = millis();
+  }
+
+  delay(2000);  // Seguís viendo datos en pantalla cada 2 segundos
+}
