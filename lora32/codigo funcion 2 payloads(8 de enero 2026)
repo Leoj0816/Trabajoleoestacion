@@ -147,7 +147,7 @@ void loop() {
   display.print("D: "); display.print(windDir,0); display.println(" deg");
   display.display();
 
-  // =================== Envío de DOS PAYLOADS cada 1 minuto ===================
+  // =================== Envío de DOS PAYLOADS  ===================
   if (millis() - ultimoEnvioTTN >= intervaloTTN) {
     float lluviaIntervalo = rainTotal - lluviaInicioIntervalo;
 
