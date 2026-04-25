@@ -175,8 +175,7 @@ void loop() {
     uint16_t luz = (uint16_t)round(lux);
     payload1[13] = highByte(luz);
     payload1[14] = lowByte(luz);
-    // byte 15 libre o para futuro uso
-
+    // 
     Serial.println(F("\n📡 Enviando PAYLOAD 1 (principal)..."));
     int16_t state1 = node.sendReceive(payload1, 15);  // ← 15 bytes
     if (state1 < RADIOLIB_ERR_NONE) {
@@ -185,7 +184,7 @@ void loop() {
       Serial.println("✅ Payload 1 enviado OK");
     }
 
-    // Pequeña espera entre uplinks (recomendable en algunas redes)
+    // 
     delay(200);
 
     // ──────────────── Payload 2 ── Partículas + extras ───────────────────
@@ -199,7 +198,8 @@ void loop() {
     // bytes 5-8 libres
 
     Serial.println(F("📡 Enviando PAYLOAD 2 (partículas)..."));
-    int16_t state2 = node.sendReceive(payload2, 5);  // ← solo 5 bytes útiles
+    int16_t state2 = node.sendReceive(payload2, 5);  // 
+
     if (state2 < RADIOLIB_ERR_NONE) {
       Serial.printf("❌ Error payload 2: %d\n", state2);
     } else {
